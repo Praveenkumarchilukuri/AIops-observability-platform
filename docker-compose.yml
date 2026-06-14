@@ -1,0 +1,107 @@
+version: '3.8'
+
+networks:
+  observability-network:
+    driver: bridge
+
+services:
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    container_name: order-service
+    ports:
+      - "8000:8000"
+    environment:
+      - PAYMENT_SERVICE_URL=http://payment-service:8001
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=order-service
+    depends_on:
+      - otel-collector
+      - payment-service
+    networks:
+      - observability-network
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: payment-service
+    ports:
+      - "8001:8001"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=payment-service
+    depends_on:
+      - otel-collector
+    networks:
+      - observability-network
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.95.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP HTTP receiver
+      - "8889:8889" # Prometheus metrics exporter
+    networks:
+      - observability-network
+
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - otel-collector
+    networks:
+      - observability-network
+
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - observability-network
+
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./grafana/tempo-config.yaml:/etc/tempo.yaml
+    ports:
+      - "3200:3200"   # Tempo HTTP
+      - "4320:4317"   # Tempo OTLP gRPC (mapped to avoid host port collision with collector)
+    networks:
+      - observability-network
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - observability-network
